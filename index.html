@@ -176,6 +176,7 @@
         let isAdmin = false;
         const ADMIN_EMAIL = "mobile.doctor73849099@gmail.com";
         const APP_ID = firebaseConfig.appId.split(':')[1]; // Extract app ID for collection path
+        const BASE_SHORT_URL_SUFFIX = ".mobiledoctor.store"; // New: Define the required suffix
 
         // Custom global message box function
         window.showMessage = (message, type = 'success', duration = 3000) => {
@@ -271,74 +272,93 @@
         };
 
         /**
-         * Checks if a short code already exists in Firestore across all users.
+         * Checks if a short code already exists in Firestore.
+         * For admins, it checks across all users. For regular users, it checks only within their own collection.
          * @param {string} shortCode - The short code to check.
+         * @param {string} userIdToCheck - The user ID to check within (only relevant for non-admins).
          * @returns {Promise<boolean>} True if the short code exists, false otherwise.
          */
-        window.isShortCodeTaken = async (shortCode) => {
-            const usersCollection = collection(db, `artifacts/${APP_ID}/users`);
-            const usersSnapshot = await getDocs(usersCollection);
-            for (const userDoc of usersSnapshot.docs) {
-                const userId = userDoc.id;
-                const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
+        window.isShortCodeTaken = async (shortCode, userIdToCheck) => {
+            if (!db) { // Ensure db is initialized before trying to use it
+                console.error("Firestore DB not initialized for isShortCodeTaken check.");
+                return true; // Treat as taken to prevent errors
+            }
+            if (isAdmin) {
+                // Admin can check across all users
+                const usersCollection = collection(db, `artifacts/${APP_ID}/users`);
+                const usersSnapshot = await getDocs(usersCollection); // This requires 'list' permission on 'users' collection
+                for (const userDoc of usersSnapshot.docs) {
+                    const userId = userDoc.id;
+                    const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
+                    const docRef = doc(urlCollectionRef, shortCode);
+                    const docSnap = await getDoc(docRef);
+                    if (docSnap.exists()) {
+                        return true;
+                    }
+                }
+                return false;
+            } else {
+                // Regular user can only check within their own collection
+                if (!userIdToCheck) {
+                    console.warn("userIdToCheck is required for non-admin isShortCodeTaken check.");
+                    return false; // Cannot check if no user ID
+                }
+                const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userIdToCheck}/shortenedUrls`);
                 const docRef = doc(urlCollectionRef, shortCode);
                 const docSnap = await getDoc(docRef);
-                if (docSnap.exists()) {
-                    return true;
-                }
+                return docSnap.exists();
             }
-            return false;
         };
 
         /**
-         * Generates a unique short code for the URL.
-         * @returns {string} A unique short code.
+         * Generates a unique random prefix for the short code.
+         * @returns {string} A unique random prefix.
          */
-        window.generateRandomShortCode = () => {
-            return Math.random().toString(36).substring(2, 10);
+        window.generateRandomShortCodePrefix = () => {
+            return Math.random().toString(36).substring(2, 8); // Shorter prefix for readability
         };
 
         /**
          * Saves a new shortened URL to Firestore for the current user.
          * @param {string} longUrl - The original long URL.
-         * @param {string} customShortCode - Optional custom short code.
+         * @param {string} customShortCodePrefix - Optional custom short code prefix.
          * @param {string} password - Optional password for the URL.
          * @returns {Promise<Object>} A promise that resolves with the saved URL data.
          */
-        window.saveShortenedUrl = async (longUrl, customShortCode, password) => {
+        window.saveShortenedUrl = async (longUrl, customShortCodePrefix, password) => {
             if (!currentUserId) {
                 throw new Error("User not authenticated.");
             }
 
-            let shortCodeToUse = customShortCode || window.generateRandomShortCode();
+            let finalShortCode; // This will be the document ID and the content of url.shortCode
 
-            // Custom short code validation
-            if (customShortCode) {
-                // For demonstration, let's allow "mobiledoctor.store" but check if it's already used.
-                // In a real app, you might validate against reserved keywords or formats.
-                if (customShortCode.length < 3) {
-                     throw new Error("Custom short code must be at least 3 characters long.");
+            // Custom short code validation and uniqueness check for the prefix
+            if (customShortCodePrefix) {
+                const cleanedPrefix = customShortCodePrefix.toLowerCase().replace(/[^a-z0-9-]/g, ''); // Basic cleaning for a URL-friendly prefix
+                if (cleanedPrefix.length < 3) {
+                    throw new Error("Custom short code prefix must be at least 3 characters long.");
                 }
-                if (customShortCode.includes('/') || customShortCode.includes('.') && customShortCode !== "mobiledoctor.store") {
-                    throw new Error("Custom short code cannot contain '/' or '.' unless it is 'mobiledoctor.store'.");
+                // Ensure no slashes or dots in the prefix itself
+                if (cleanedPrefix.includes('/') || cleanedPrefix.includes('.')) {
+                    throw new Error("Custom short code prefix cannot contain '/' or '.'.");
                 }
-                const isTaken = await window.isShortCodeTaken(customShortCode);
-                if (isTaken) {
-                    throw new Error(`Custom short code '${customShortCode}' is already taken.`);
-                }
+                finalShortCode = `${cleanedPrefix}${BASE_SHORT_URL_SUFFIX}`;
             } else {
-                // Ensure random code is also unique (unlikely for random but good practice)
-                while (await window.isShortCodeTaken(shortCodeToUse)) {
-                    shortCodeToUse = window.generateRandomShortCode();
-                }
+                // Generate a random prefix and append the fixed suffix
+                finalShortCode = `${window.generateRandomShortCodePrefix()}${BASE_SHORT_URL_SUFFIX}`;
             }
 
+            // Now check if this finalShortCode (e.g., 'myprefix.mobiledoctor.store') is taken
+            const isTaken = await window.isShortCodeTaken(finalShortCode, currentUserId);
+            if (isTaken) {
+                throw new Error(`The short code '${finalShortCode}' is already taken.`);
+            }
 
             const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${currentUserId}/shortenedUrls`);
-            const docRef = doc(urlCollectionRef, shortCodeToUse); // Use the chosen short code as document ID
+            const docRef = doc(urlCollectionRef, finalShortCode); // Use the full finalShortCode as document ID
             const urlData = {
                 longUrl: longUrl,
-                shortCode: shortCodeToUse, // Store the final short code
+                shortCode: finalShortCode, // Store the full final short code including the suffix
                 isActive: true,
                 expiresAt: null,
                 createdAt: serverTimestamp(),
@@ -347,7 +367,7 @@
                 clickCount: 0, // Initialize click count
                 password: password || null // Store password (plaintext, see disclaimer)
             };
-            await setDoc(docRef, urlData);
+            await setDoc(docRef, urlData); // This will fail if shortCodeToUse is already a document ID for this user.
             return urlData;
         };
 
@@ -358,8 +378,8 @@
          * @param {boolean} isActive - The new active status.
          */
         window.updateUrlActiveStatus = async (userId, shortCode, isActive) => {
-            if (!currentUserId) {
-                window.showMessage("Not authenticated.", "error");
+            if (!db || !currentUserId) { // Ensure db is initialized and user is logged in
+                window.showMessage("Not authenticated or Firebase not ready.", "error");
                 return;
             }
             const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
@@ -375,8 +395,8 @@
          * @param {Date|null} expiryDate - The new expiration date, or null to remove expiration.
          */
         window.updateUrlExpiration = async (userId, shortCode, expiryDate) => {
-            if (!currentUserId) {
-                window.showMessage("Not authenticated.", "error");
+            if (!db || !currentUserId) { // Ensure db is initialized and user is logged in
+                window.showMessage("Not authenticated or Firebase not ready.", "error");
                 return;
             }
             const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
@@ -391,7 +411,7 @@
          * @param {string} shortCode - The short code of the URL.
          */
         window.incrementClickCount = async (userId, shortCode) => {
-             if (!currentUserId) { // Only track clicks if someone is logged in
+             if (!db || !currentUserId) { // Only track clicks if someone is logged in and DB ready
                 return;
             }
             const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
@@ -444,10 +464,15 @@
             previewFrame.src = url;
 
             // Add event listener to increment click count on successful iframe load
+            // Ensure listeners are added once and removed to prevent memory leaks/multiple increments
             const handleLoad = () => {
-                window.incrementClickCount(ownerId, shortCode);
+                if (ownerId && shortCode) { // Only increment if valid IDs are passed
+                    window.incrementClickCount(ownerId, shortCode);
+                }
                 previewFrame.removeEventListener('load', handleLoad); // Remove to prevent multiple increments
             };
+            // Clear existing listeners before adding a new one for a new preview
+            previewFrame.onload = null; // Remove previous onload handler
             previewFrame.addEventListener('load', handleLoad);
         }
 
@@ -470,6 +495,9 @@
                     passwordModal.classList.remove('show');
                     window.showMessage('Password correct! Loading preview.', 'success');
                     showPreview(urlData.longUrl, urlData.createdBy, urlData.shortCode);
+                    // Remove event listeners after successful submission to prevent duplicates
+                    passwordInput.removeEventListener('keydown', handleKeydown);
+                    passwordSubmitButton.removeEventListener('click', handleSubmit);
                 } else {
                     passwordMessage.textContent = 'Incorrect password.';
                     passwordMessage.classList.add('text-red-500');
@@ -478,6 +506,7 @@
 
             const handleClose = () => {
                 passwordModal.classList.remove('show');
+                // Ensure all listeners are removed when modal closes
                 passwordInput.removeEventListener('keydown', handleKeydown);
                 passwordSubmitButton.removeEventListener('click', handleSubmit);
             };
@@ -487,6 +516,11 @@
                     handleSubmit();
                 }
             };
+
+            // Remove previous listeners before adding new ones for safety
+            passwordSubmitButton.removeEventListener('click', handleSubmit);
+            document.getElementById('passwordModalClose').removeEventListener('click', handleClose);
+            passwordInput.removeEventListener('keydown', handleKeydown);
 
             passwordSubmitButton.addEventListener('click', handleSubmit);
             document.getElementById('passwordModalClose').addEventListener('click', handleClose);
@@ -535,7 +569,8 @@
                  urlItem.classList.add('bg-white', 'border-blue-100', 'p-3'); // Lighter for nested admin view
             }
 
-            const shortDisplayUrl = `https://app.com/s/${url.shortCode}`;
+            // The displayed short URL now always starts with "https://" and uses the full shortCode from Firestore
+            const shortDisplayUrl = `https://${url.shortCode}`;
 
             urlItem.innerHTML = `
                 <div class="flex flex-col md:flex-row md:items-center justify-between mb-2">
@@ -644,8 +679,8 @@
          * Sets up a real-time listener for the current user's shortened URLs from Firestore.
          */
         window.setupUserUrlListener = () => {
-            if (!currentUserId) {
-                console.log("Skipping user URL listener setup: No user ID.");
+            if (!currentUserId || !db) { // Ensure db is initialized and user ID exists
+                console.log("Skipping user URL listener setup: No user ID or DB not ready.");
                 return;
             }
             const userUrlsCollectionRef = collection(db, `artifacts/${APP_ID}/users/${currentUserId}/shortenedUrls`);
@@ -719,17 +754,15 @@
          * Listens for changes across all user's URL subcollections.
          */
         window.setupAdminListeners = async () => {
-            if (!isAdmin) {
-                console.log("Not an admin. Skipping admin listeners.");
+            if (!isAdmin || !db) { // Ensure db is initialized and user is admin
+                console.log("Not an admin or DB not ready. Skipping admin listeners.");
                 return;
             }
 
             const rootUsersCollection = collection(db, `artifacts/${APP_ID}/users`);
 
-            // This is a simplified approach. In a real app, you'd have a
-            // 'users' collection to list all user UIDs and loop through those,
-            // or use Firebase Functions to aggregate data securely.
-            // This setup relies on getting user docs from the path where they create URLs.
+            // This approach relies on having 'users' documents already existing.
+            // onSnapshot will trigger whenever any user document or its subcollections change.
             onSnapshot(rootUsersCollection, async (usersSnapshot) => {
                 const usersDataPromises = usersSnapshot.docs.map(async (userDoc) => {
                     const userId = userDoc.id;
@@ -798,14 +831,21 @@
                     window.showMessage('Please sign in to shorten URLs.', 'error');
                     return;
                 }
+                if (!db) { // Additional check for db initialization
+                    window.showMessage('Firebase is not initialized. Please try again later or check console.', 'error');
+                    return;
+                }
+
 
                 shortenText.classList.add('hidden');
                 shortenSpinner.classList.remove('hidden');
                 shortenButton.disabled = true;
 
                 try {
+                    // Pass customShortCode to saveShortenedUrl (it will be treated as the prefix)
                     const savedUrlData = await window.saveShortenedUrl(longUrl, customShortCode, password);
-                    const displayShortUrl = `https://app.com/s/${savedUrlData.shortCode}`;
+                    // The displayed short URL now directly uses the full shortCode from savedUrlData
+                    const displayShortUrl = `https://${savedUrlData.shortCode}`;
                     shortUrlDisplay.value = displayShortUrl;
                     latestResultContainer.classList.remove('hidden');
                     window.showMessage('URL shortened successfully!', 'success');
@@ -923,10 +963,10 @@
         </div>
 
         <div class="mb-5">
-            <label for="customShortCode" class="block text-gray-700 text-sm font-semibold mb-2">Custom Short Code (Optional):</label>
-            <input type="text" id="customShortCode" placeholder="e.g., my-special-link or mobiledoctor.store"
+            <label for="customShortCode" class="block text-gray-700 text-sm font-semibold mb-2">Custom Short Code Prefix (Optional):</label>
+            <input type="text" id="customShortCode" placeholder="e.g., my-special-link"
                    class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900">
-            <p class="text-xs text-gray-500 mt-1">If left blank, a random code will be generated. Avoid special characters.</p>
+            <p class="text-xs text-gray-500 mt-1">Your shortened URL will end with ".mobiledoctor.store". (e.g., "my-special-link.mobiledoctor.store").</p>
         </div>
 
         <div class="mb-5">
