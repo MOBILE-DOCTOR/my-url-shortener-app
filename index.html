@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URL Shortener & Preview (Admin)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: "Inter", sans-serif;
+            background-color: #f0f2f5;
+        }
+        #previewFrame {
+            width: 100%;
+            min-height: 400px;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            background-color: #ffffff;
+        }
+        @media (max-width: 768px) {
+            #previewFrame {
+                overflow: auto;
+            }
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3b82f6;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        #messageBox {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            background-color: #4CAF50;
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+        }
+        #messageBox.error {
+            background-color: #f44336;
+        }
+        #messageBox.show {
+            display: block;
+            opacity: 1;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 40px;
+            height: 24px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            -webkit-transition: .4s;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            -webkit-transition: .4s;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:focus + .slider {
+            box-shadow: 0 0 1px #2196F3;
+        }
+        input:checked + .slider:before {
+            -webkit-transform: translateX(16px);
+            -ms-transform: translateX(16px);
+            transform: translateX(16px);
+        }
+    </style>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, Timestamp, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Configuration (from your input)
+        const firebaseConfig = {
+            apiKey: "AIzaSyAGnngrCaf5327zkOq1Eqhl8aIkIy4CFYc",
+            authDomain: "my-url-shortener-app.firebaseapp.com",
+            databaseURL: "https://my-url-shortener-app-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "my-url-shortener-app",
+            storageBucket: "my-url-shortener-app.firebasestorage.app",
+            messagingSenderId: "111222164281",
+            appId: "1:111222164281:web:cb5c9c65a32133c69936e8"
+        };
+
+        // Global Firebase variables
+        let app;
+        let db;
+        let auth;
+        let currentUserId = null;
+        let currentUserName = 'Guest';
+        let currentUserEmail = null;
+        let isAdmin = false;
+        const ADMIN_EMAIL = "mobile.doctor73849099@gmail.com";
+        const APP_ID = firebaseConfig.appId.split(':')[1]; // Extract app ID for collection path
+
+        // Custom global message box function
+        window.showMessage = (message, type = 'success', duration = 3000) => {
+            const messageBox = document.getElementById('messageBox');
+            messageBox.textContent = message;
+            messageBox.classList.remove('success', 'error');
+            messageBox.classList.add(type);
+            messageBox.classList.add('show');
+            setTimeout(() => {
+                messageBox.classList.remove('show');
+            }, duration);
+        };
+
+        /**
+         * Initializes Firebase and handles user authentication.
+         */
+        window.initFirebase = async () => {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    const authStatusDiv = document.getElementById('authStatus');
+                    const signInButton = document.getElementById('signInButton');
+                    const signOutButton = document.getElementById('signOutButton');
+                    const adminPanel = document.getElementById('adminPanel');
+                    const userPanel = document.getElementById('userPanel');
+                    const urlShortenerSection = document.getElementById('urlShortenerSection');
+
+                    if (user) {
+                        currentUserId = user.uid;
+                        currentUserName = user.displayName || user.email;
+                        currentUserEmail = user.email;
+                        isAdmin = (currentUserEmail === ADMIN_EMAIL);
+
+                        authStatusDiv.textContent = `Logged in as: ${currentUserName} (${currentUserEmail})`;
+                        signInButton.classList.add('hidden');
+                        signOutButton.classList.remove('hidden');
+                        urlShortenerSection.classList.remove('hidden'); // Show shortener for any logged-in user
+
+                        if (isAdmin) {
+                            adminPanel.classList.remove('hidden');
+                            userPanel.classList.add('hidden'); // Hide user panel if admin
+                            await window.setupAdminListeners();
+                        } else {
+                            adminPanel.classList.add('hidden');
+                            userPanel.classList.remove('hidden'); // Show user panel for regular users
+                            await window.setupUserUrlListener();
+                        }
+                        window.showMessage(`Welcome, ${currentUserName}!`, 'success');
+                    } else {
+                        currentUserId = null;
+                        currentUserName = 'Guest';
+                        currentUserEmail = null;
+                        isAdmin = false;
+
+                        authStatusDiv.textContent = 'Not logged in.';
+                        signInButton.classList.remove('hidden');
+                        signOutButton.classList.add('hidden');
+                        adminPanel.classList.add('hidden');
+                        userPanel.classList.add('hidden');
+                        urlShortenerSection.classList.add('hidden'); // Hide shortener if not logged in
+                        window.showMessage('Please sign in to use the shortener.', 'info');
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                window.showMessage(`Failed to initialize Firebase: ${error.message}`, "error");
+            }
+        };
+
+        // Google Sign-In
+        window.signInWithGoogle = async () => {
+            const provider = new GoogleAuthProvider();
+            try {
+                await signInWithPopup(auth, provider);
+            } catch (error) {
+                console.error("Google Sign-In Error:", error);
+                window.showMessage(`Sign-in failed: ${error.message}`, "error");
+            }
+        };
+
+        // Sign Out
+        window.signOutUser = async () => {
+            try {
+                await signOut(auth);
+                window.showMessage('Signed out successfully.', 'success');
+            } catch (error) {
+                console.error("Sign-Out Error:", error);
+                window.showMessage(`Sign-out failed: ${error.message}`, "error");
+            }
+        };
+
+        /**
+         * Generates a unique short code for the URL.
+         * @returns {string} A unique short code.
+         */
+        window.generateShortCode = () => {
+            return Math.random().toString(36).substring(2, 10);
+        };
+
+        /**
+         * Saves a new shortened URL to Firestore for the current user.
+         * @param {string} longUrl - The original long URL.
+         * @returns {Promise<Object>} A promise that resolves with the saved URL data.
+         */
+        window.saveShortenedUrl = async (longUrl) => {
+            if (!currentUserId) {
+                throw new Error("User not authenticated.");
+            }
+            const shortCode = window.generateShortCode();
+            const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${currentUserId}/shortenedUrls`);
+            const docRef = doc(urlCollectionRef, shortCode);
+            const urlData = {
+                longUrl: longUrl,
+                shortCode: shortCode,
+                isActive: true,
+                expiresAt: null,
+                createdAt: serverTimestamp(),
+                createdBy: currentUserId,
+                createdByEmail: currentUserEmail
+            };
+            await setDoc(docRef, urlData);
+            return urlData;
+        };
+
+        /**
+         * Updates the active status of a shortened URL in Firestore.
+         * @param {string} userId - The ID of the user who owns the URL.
+         * @param {string} shortCode - The short code of the URL.
+         * @param {boolean} isActive - The new active status.
+         */
+        window.updateUrlActiveStatus = async (userId, shortCode, isActive) => {
+            if (!currentUserId) {
+                window.showMessage("Not authenticated.", "error");
+                return;
+            }
+            // In a real app, admin would need security rules to access other users' data
+            const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
+            const docRef = doc(urlCollectionRef, shortCode);
+            await setDoc(docRef, { isActive: isActive }, { merge: true });
+            window.showMessage(`URL ${isActive ? 'activated' : 'deactivated'}!`, 'success');
+        };
+
+        /**
+         * Updates the expiration date of a shortened URL in Firestore.
+         * @param {string} userId - The ID of the user who owns the URL.
+         * @param {string} shortCode - The short code of the URL.
+         * @param {Date|null} expiryDate - The new expiration date, or null to remove expiration.
+         */
+        window.updateUrlExpiration = async (userId, shortCode, expiryDate) => {
+            if (!currentUserId) {
+                window.showMessage("Not authenticated.", "error");
+                return;
+            }
+            const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
+            const docRef = doc(urlCollectionRef, shortCode);
+            await setDoc(docRef, { expiresAt: expiryDate ? Timestamp.fromDate(expiryDate) : null }, { merge: true });
+            window.showMessage(`Expiration set for URL.`, 'success');
+        };
+
+        /**
+         * Renders the list of shortened URLs for a regular user.
+         * @param {Array<Object>} urls - An array of URL objects from Firestore.
+         */
+        window.renderUserShortenedUrls = (urls) => {
+            const userUrlsList = document.getElementById('userShortenedUrlsList');
+            const noUserUrlsMessage = document.getElementById('noUserUrlsMessage');
+            userUrlsList.innerHTML = '';
+            if (urls.length === 0) {
+                noUserUrlsMessage.classList.remove('hidden');
+            } else {
+                noUserUrlsMessage.classList.add('hidden');
+                urls.forEach(url => {
+                    const isExpired = url.expiresAt && url.expiresAt.toDate() < new Date();
+                    const statusText = isExpired ? 'Expired' : (url.isActive ? 'Active' : 'Inactive');
+                    let statusColor = 'text-green-600';
+                    if (!url.isActive) statusColor = 'text-red-600';
+                    if (isExpired) statusColor = 'text-yellow-600';
+
+                    const urlItem = document.createElement('div');
+                    urlItem.className = `bg-gray-50 p-4 rounded-lg shadow-sm border border-gray-200 ${!url.isActive || isExpired ? 'opacity-70' : ''}`;
+                    urlItem.innerHTML = `
+                        <div class="flex flex-col md:flex-row md:items-center justify-between mb-2">
+                            <div class="mb-2 md:mb-0">
+                                <p class="text-sm font-semibold text-blue-700 break-words">Short: <span class="font-normal text-blue-500">https://app.com/s/${url.shortCode}</span></p>
+                                <p class="text-sm text-gray-700 break-words">Original: <a href="${url.longUrl}" target="_blank" class="text-blue-500 hover:underline">${url.longUrl}</a></p>
+                            </div>
+                            <div class="flex items-center space-x-4">
+                                <span class="font-bold ${statusColor}">${statusText}</span>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" data-short-code="${url.shortCode}" ${url.isActive ? 'checked' : ''} ${isExpired ? 'disabled' : ''}>
+                                    <span class="slider round"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="flex flex-col sm:flex-row items-start sm:items-center gap-2 mt-3 pt-3 border-t border-gray-200">
+                            <label for="expiry-${url.shortCode}" class="text-sm text-gray-600 mr-2 flex-shrink-0">Expire On:</label>
+                            <input type="datetime-local" id="expiry-${url.shortCode}" value="${url.expiresAt ? new Date(url.expiresAt.toDate().getTime() - (url.expiresAt.toDate().getTimezoneOffset() * 60000)).toISOString().slice(0, 16) : ''}"
+                                class="w-full sm:w-auto px-2 py-1 border border-gray-300 rounded-md text-sm text-gray-900 focus:ring-blue-500 focus:border-blue-500" ${isExpired ? 'disabled' : ''}>
+                            <button data-short-code="${url.shortCode}" data-action="set-expiry" data-user-id="${currentUserId}"
+                                class="w-full sm:w-auto bg-gray-200 text-gray-700 text-sm py-1 px-3 rounded-md hover:bg-gray-300 transition duration-200 ease-in-out flex-shrink-0" ${isExpired ? 'disabled' : ''}>
+                                Set Expiry
+                            </button>
+                            <button data-short-code="${url.shortCode}" data-action="preview" data-long-url="${url.longUrl}"
+                                class="w-full sm:w-auto bg-blue-500 text-white text-sm py-1 px-3 rounded-md hover:bg-blue-600 transition duration-200 ease-in-out flex-shrink-0">
+                                View Preview
+                            </button>
+                        </div>
+                    `;
+                    userUrlsList.appendChild(urlItem);
+
+                    // Add event listeners for the new elements
+                    const toggleInput = urlItem.querySelector(`input[type="checkbox"]`);
+                    if (toggleInput) {
+                        toggleInput.addEventListener('change', async (event) => {
+                            const code = event.target.dataset.shortCode;
+                            await window.updateUrlActiveStatus(currentUserId, code, event.target.checked);
+                        });
+                    }
+
+                    const setExpiryButton = urlItem.querySelector(`button[data-action="set-expiry"]`);
+                    if (setExpiryButton) {
+                        setExpiryButton.addEventListener('click', async (event) => {
+                            const code = event.target.dataset.shortCode;
+                            const userId = event.target.dataset.userId;
+                            const expiryInput = urlItem.querySelector(`#expiry-${code}`);
+                            const expiryValue = expiryInput.value;
+                            let expiryDate = null;
+                            if (expiryValue) {
+                                expiryDate = new Date(expiryValue);
+                                if (isNaN(expiryDate.getTime())) {
+                                    window.showMessage("Invalid date/time for expiration.", "error");
+                                    return;
+                                }
+                            }
+                            await window.updateUrlExpiration(userId, code, expiryDate);
+                        });
+                    }
+
+                    const viewPreviewButton = urlItem.querySelector(`button[data-action="preview"]`);
+                    if (viewPreviewButton) {
+                        viewPreviewButton.addEventListener('click', (event) => {
+                            const longUrl = event.target.dataset.longUrl;
+                            showPreview(longUrl);
+                        });
+                    }
+                });
+            }
+        };
+
+        /**
+         * Sets up a real-time listener for the current user's shortened URLs from Firestore.
+         */
+        window.setupUserUrlListener = () => {
+            if (!currentUserId) {
+                console.log("Skipping user URL listener setup: No user ID.");
+                return;
+            }
+            const userUrlsCollectionRef = collection(db, `artifacts/${APP_ID}/users/${currentUserId}/shortenedUrls`);
+            onSnapshot(query(userUrlsCollectionRef), (snapshot) => {
+                const urls = [];
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    urls.push({ id: doc.id, ...data });
+                });
+                window.renderUserShortenedUrls(urls);
+            }, (error) => {
+                console.error("Error fetching user shortened URLs:", error);
+                window.showMessage("Error fetching your URLs: " + error.message, "error");
+            });
+        };
+
+        /**
+         * Renders all users and their URLs for the admin panel.
+         * @param {Array<Object>} usersData - An array of user data objects.
+         */
+        window.renderAdminUsersAndUrls = (usersData) => {
+            const adminUsersList = document.getElementById('adminUsersList');
+            adminUsersList.innerHTML = ''; // Clear previous list
+
+            if (usersData.length === 0) {
+                adminUsersList.innerHTML = '<p class="text-center text-gray-500">No users found.</p>';
+                return;
+            }
+
+            usersData.forEach(user => {
+                const userDiv = document.createElement('div');
+                userDiv.className = 'bg-blue-50 p-4 rounded-lg shadow-sm border border-blue-200 mb-6';
+                userDiv.innerHTML = `
+                    <div class="flex items-center justify-between mb-3 border-b pb-2 border-blue-200">
+                        <h3 class="text-lg font-bold text-blue-800">${user.email || 'Anonymous User'} <span class="text-sm font-normal text-gray-600">(${user.id})</span></h3>
+                        <div class="flex space-x-2">
+                             <button data-user-id="${user.id}" data-action="remove-user"
+                                class="bg-red-500 text-white text-xs py-1 px-3 rounded-md hover:bg-red-600 transition duration-200 ease-in-out">
+                                Remove User (Simulated)
+                            </button>
+                        </div>
+                    </div>
+                    <div class="space-y-3" id="urls-for-user-${user.id}">
+                        ${user.urls.length === 0 ? '<p class="text-sm text-gray-500">No URLs for this user.</p>' : ''}
+                    </div>
+                `;
+                adminUsersList.appendChild(userDiv);
+
+                const userUrlsContainer = userDiv.querySelector(`#urls-for-user-${user.id}`);
+                user.urls.forEach(url => {
+                    const isExpired = url.expiresAt && url.expiresAt.toDate() < new Date();
+                    const statusText = isExpired ? 'Expired' : (url.isActive ? 'Active' : 'Inactive');
+                    let statusColor = 'text-green-600';
+                    if (!url.isActive) statusColor = 'text-red-600';
+                    if (isExpired) statusColor = 'text-yellow-600';
+
+                    const urlItem = document.createElement('div');
+                    urlItem.className = `bg-white p-3 rounded-md border border-gray-100 ${!url.isActive || isExpired ? 'opacity-70' : ''}`;
+                    urlItem.innerHTML = `
+                        <p class="text-xs font-semibold text-gray-700 break-words">Short: <span class="font-normal text-blue-500">https://app.com/s/${url.shortCode}</span></p>
+                        <p class="text-xs text-gray-600 break-words">Original: <a href="${url.longUrl}" target="_blank" class="text-blue-500 hover:underline">${url.longUrl}</a></p>
+                        <div class="flex items-center justify-between mt-2">
+                            <div class="flex items-center space-x-2">
+                                <span class="font-bold text-xs ${statusColor}">${statusText}</span>
+                                <label class="toggle-switch transform scale-75">
+                                    <input type="checkbox" data-short-code="${url.shortCode}" data-user-id="${user.id}" ${url.isActive ? 'checked' : ''} ${isExpired ? 'disabled' : ''}>
+                                    <span class="slider round"></span>
+                                </label>
+                            </div>
+                            <div class="flex space-x-2 items-center">
+                                <label for="admin-expiry-${user.id}-${url.shortCode}" class="text-xs text-gray-600 flex-shrink-0">Expire:</label>
+                                <input type="datetime-local" id="admin-expiry-${user.id}-${url.shortCode}" value="${url.expiresAt ? new Date(url.expiresAt.toDate().getTime() - (url.expiresAt.toDate().getTimezoneOffset() * 60000)).toISOString().slice(0, 16) : ''}"
+                                    class="w-32 px-1 py-0.5 border border-gray-300 rounded-md text-xs text-gray-900 focus:ring-blue-500 focus:border-blue-500" ${isExpired ? 'disabled' : ''}>
+                                <button data-short-code="${url.shortCode}" data-user-id="${user.id}" data-action="admin-set-expiry"
+                                    class="bg-gray-200 text-gray-700 text-xs py-1 px-2 rounded-md hover:bg-gray-300 transition duration-200 ease-in-out flex-shrink-0" ${isExpired ? 'disabled' : ''}>
+                                    Set
+                                </button>
+                                <button data-short-code="${url.shortCode}" data-long-url="${url.longUrl}" data-action="preview"
+                                    class="bg-blue-500 text-white text-xs py-1 px-2 rounded-md hover:bg-blue-600 transition duration-200 ease-in-out flex-shrink-0">
+                                    Preview
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    userUrlsContainer.appendChild(urlItem);
+
+                    // Add event listeners for admin controls
+                    const toggleInput = urlItem.querySelector(`input[type="checkbox"]`);
+                    if (toggleInput) {
+                        toggleInput.addEventListener('change', async (event) => {
+                            const code = event.target.dataset.shortCode;
+                            const ownerId = event.target.dataset.userId;
+                            await window.updateUrlActiveStatus(ownerId, code, event.target.checked);
+                        });
+                    }
+
+                    const setExpiryButton = urlItem.querySelector(`button[data-action="admin-set-expiry"]`);
+                    if (setExpiryButton) {
+                        setExpiryButton.addEventListener('click', async (event) => {
+                            const code = event.target.dataset.shortCode;
+                            const ownerId = event.target.dataset.userId;
+                            const expiryInput = urlItem.querySelector(`#admin-expiry-${ownerId}-${code}`);
+                            const expiryValue = expiryInput.value;
+                            let expiryDate = null;
+                            if (expiryValue) {
+                                expiryDate = new Date(expiryValue);
+                                if (isNaN(expiryDate.getTime())) {
+                                    window.showMessage("Invalid date/time for expiration.", "error");
+                                    return;
+                                }
+                            }
+                            await window.updateUrlExpiration(ownerId, code, expiryDate);
+                        });
+                    }
+
+                    const viewPreviewButton = urlItem.querySelector(`button[data-action="preview"]`);
+                    if (viewPreviewButton) {
+                        viewPreviewButton.addEventListener('click', (event) => {
+                            const longUrl = event.target.dataset.long-url;
+                            showPreview(longUrl);
+                        });
+                    }
+                });
+
+                // Add event listener for remove user button
+                const removeUserButton = userDiv.querySelector('button[data-action="remove-user"]');
+                if (removeUserButton) {
+                    removeUserButton.addEventListener('click', () => {
+                        window.showMessage(`User removal for ${user.email || user.id} is simulated. In a real app, this would delete their auth and data.`, 'info', 5000);
+                        console.log(`Simulating remove user: ${user.id}`);
+                        // In a real app, you'd call a Cloud Function or Admin SDK here
+                    });
+                }
+            });
+        };
+
+        /**
+         * Fetches all user data and their URLs for the admin panel.
+         * Listens for changes across all user's URL subcollections.
+         */
+        window.setupAdminListeners = async () => {
+            if (!isAdmin) {
+                console.log("Not an admin. Skipping admin listeners.");
+                return;
+            }
+
+            // Get all user document IDs from the 'users' collection (assuming you have one, or infer from 'shortenedUrls' paths)
+            // Note: Firestore doesn't provide a direct way to list all subcollections.
+            // We'll iterate through all possible user IDs by first getting users who have created URLs
+            // This is a simplified approach. In a real app, you'd likely have a 'users' collection
+            // to list all user UIDs and loop through those.
+
+            const rootArtifactsCollection = collection(db, `artifacts/${APP_ID}/users`);
+
+            // This will listen for any change within any user's shortenedUrls subcollection
+            onSnapshot(rootArtifactsCollection, async (usersSnapshot) => {
+                const usersData = [];
+                for (const userDoc of usersSnapshot.docs) {
+                    const userId = userDoc.id;
+                    const userUrlsCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
+                    const userUrlsSnapshot = await getDocs(userUrlsCollectionRef); // Fetch all URLs for this user
+                    const urls = [];
+                    userUrlsSnapshot.forEach(urlDoc => {
+                        urls.push({ id: urlDoc.id, ...urlDoc.data() });
+                    });
+                    // Assuming userDoc.data() might contain user info, but often 'users' collection stores it.
+                    // For this demo, we can just use userId and maybe an inferred email.
+                    usersData.push({ id: userId, email: urls[0]?.createdByEmail || 'N/A', urls: urls }); // Use createdByEmail from first URL if available
+                }
+                window.renderAdminUsersAndUrls(usersData);
+            }, (error) => {
+                console.error("Error fetching all users' URLs for admin:", error);
+                window.showMessage("Error fetching admin data: " + error.message, "error");
+            });
+
+            // Admin specific actions
+            document.getElementById('addDummyUserButton').addEventListener('click', () => {
+                window.showMessage('Adding a new user is simulated. In a real app, this would use Firebase Admin SDK.', 'info', 5000);
+                console.log('Simulating add new user.');
+                // In a real app, you'd call a Cloud Function or Admin SDK here
+            });
+        };
+
+        /**
+         * Displays the URL in the preview iframe.
+         * @param {string} url - The URL to preview.
+         */
+        function showPreview(url) {
+            previewError.classList.add('hidden');
+            previewContainer.classList.remove('hidden');
+            previewSpinner.classList.remove('hidden');
+            previewLoadingText.classList.remove('hidden');
+            previewContainer.scrollIntoView({ behavior: 'smooth' });
+            previewFrame.src = url;
+        }
+
+        // Event listener for main shorten button
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('shortenButton').addEventListener('click', async () => {
+                const longUrl = document.getElementById('longUrl').value.trim();
+
+                latestResultContainer.classList.add('hidden');
+                previewContainer.classList.add('hidden');
+                previewError.classList.add('hidden');
+                copyMessage.classList.add('hidden');
+                previewFrame.src = 'about:blank';
+
+                if (!longUrl) {
+                    window.showMessage('Please enter a URL to shorten.', 'error');
+                    return;
+                }
+                if (!longUrl.startsWith('http://') && !longUrl.startsWith('https://')) {
+                    window.showMessage('Please enter a valid URL starting with http:// or https://', 'error');
+                    return;
+                }
+                if (!currentUserId) {
+                    window.showMessage('Please sign in to shorten URLs.', 'error');
+                    return;
+                }
+
+                shortenText.classList.add('hidden');
+                shortenSpinner.classList.remove('hidden');
+                shortenButton.disabled = true;
+
+                try {
+                    const savedUrlData = await window.saveShortenedUrl(longUrl);
+                    document.getElementById('shortUrlDisplay').value = `https://app.com/s/${savedUrlData.shortCode}`;
+                    latestResultContainer.classList.remove('hidden');
+                    window.showMessage('URL shortened successfully!', 'success');
+                    showPreview(longUrl); // Show preview of the original URL
+                } catch (error) {
+                    window.showMessage(`Error shortening URL: ${error.message}`, 'error');
+                    console.error('Shortening error:', error);
+                } finally {
+                    shortenText.classList.remove('hidden');
+                    shortenSpinner.classList.add('hidden');
+                    shortenButton.disabled = false;
+                }
+            });
+
+            // Event listener for copy button
+            document.getElementById('copyButton').addEventListener('click', () => {
+                const shortUrl = document.getElementById('shortUrlDisplay').value;
+                if (shortUrl) {
+                    if (copyTextToClipboard(shortUrl)) {
+                        document.getElementById('copyMessage').classList.remove('hidden');
+                        setTimeout(() => document.getElementById('copyMessage').classList.add('hidden'), 2000);
+                    } else {
+                        window.showMessage('Failed to copy. Please try manually.', 'error');
+                    }
+                }
+            });
+
+            // Initialize Firebase on DOM content loaded
+            window.initFirebase();
+        });
+    </script>
+</head>
+<body class="flex flex-col items-center min-h-screen p-4 bg-gray-100 text-gray-800">
+
+    <div id="messageBox" class="rounded-lg"></div>
+
+    <div class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-lg mb-8 text-center">
+        <h1 class="text-3xl font-bold text-blue-700 mb-4">🔗 URL Shortener & Admin</h1>
+        <p id="authStatus" class="text-gray-700 mb-4">Loading authentication status...</p>
+        <button id="signInButton" onclick="signInWithGoogle()"
+                class="bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 hidden">
+            Sign in with Google
+        </button>
+        <button id="signOutButton" onclick="signOutUser()"
+                class="bg-red-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-red-700 transition duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 hidden">
+            Sign Out
+        </button>
+    </div>
+
+    <div id="urlShortenerSection" class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-lg mb-8 hidden">
+        <h2 class="text-2xl font-bold text-center text-blue-700 mb-6">Shorten Your URLs</h2>
+        <div class="mb-5">
+            <label for="longUrl" class="block text-gray-700 text-sm font-semibold mb-2">Enter Long URL:</label>
+            <input type="url" id="longUrl" placeholder="e.g., https://www.example.com/very/long/path/to/page"
+                   class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
+                   value="https://www.google.com">
+            <p class="text-xs text-gray-500 mt-1">Make sure to include 'http://' or 'https://'</p>
+        </div>
+        <div class="flex flex-col sm:flex-row gap-4 mb-6">
+            <button id="shortenButton"
+                    class="flex items-center justify-center flex-grow bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                <span id="shortenText">Shorten URL</span>
+                <div id="shortenSpinner" class="spinner ml-2 hidden"></div>
+            </button>
+        </div>
+        <div id="latestResultContainer" class="hidden mb-6 bg-blue-50 p-4 rounded-lg border border-blue-200">
+            <p class="text-blue-800 font-semibold mb-2">Your New Shortened URL:</p>
+            <div class="flex items-center bg-white border border-blue-300 rounded-md overflow-hidden">
+                <input type="text" id="shortUrlDisplay" readonly
+                       class="flex-grow px-3 py-2 text-blue-700 bg-blue-50 cursor-text select-all focus:outline-none">
+                <button id="copyButton"
+                        class="bg-blue-500 text-white px-4 py-2 hover:bg-blue-600 transition duration-300 ease-in-out rounded-r-md">
+                    Copy
+                </button>
+            </div>
+            <p id="copyMessage" class="text-sm text-green-600 mt-2 hidden">Copied!</p>
+            <p class="text-sm text-red-500 mt-2">
+                <strong class="font-bold">Note:</strong> This is a client-side simulation. A real URL shortener requires a backend service to handle redirects.
+            </p>
+        </div>
+    </div>
+
+    <div id="userPanel" class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-5xl mb-8 hidden">
+        <h2 class="text-2xl font-bold text-center text-blue-700 mb-4">Your Shortened URLs</h2>
+        <div id="userShortenedUrlsList" class="space-y-4">
+            <p class="text-center text-gray-500" id="noUserUrlsMessage">No URLs shortened yet.</p>
+        </div>
+    </div>
+
+    <div id="adminPanel" class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-5xl mb-8 hidden">
+        <h2 class="text-2xl font-bold text-center text-red-700 mb-4">👑 Admin Panel</h2>
+        <div class="mb-6 border-b pb-4 border-red-200">
+            <h3 class="text-xl font-semibold text-red-800 mb-3">Admin Actions</h3>
+            <button id="addDummyUserButton"
+                    class="bg-green-500 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-green-600 transition duration-300 ease-in-out">
+                Add New User (Simulated)
+            </button>
+            <p class="text-sm text-gray-500 mt-2">These actions are simulated client-side. Real user management requires Firebase Admin SDK.</p>
+        </div>
+        <h3 class="text-xl font-semibold text-red-800 mb-4">All Users & Their URLs</h3>
+        <div id="adminUsersList" class="space-y-6">
+            <p class="text-center text-gray-500">Loading user data for admin...</p>
+        </div>
+    </div>
+
+    <div id="previewContainer" class="hidden w-full max-w-5xl bg-white p-6 md:p-8 rounded-xl shadow-lg">
+        <h2 class="text-2xl font-bold text-center text-blue-700 mb-4">Live Preview of Original URL</h2>
+        <div class="flex items-center justify-center mb-4">
+            <div id="previewSpinner" class="spinner mr-2 hidden"></div>
+            <p id="previewLoadingText" class="text-gray-600 hidden">Loading preview...</p>
+        </div>
+        <iframe id="previewFrame" title="URL Preview" sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-top-navigation"></iframe>
+        <p id="previewError" class="text-red-500 text-center mt-4 hidden">
+            Could not load preview. This might be due to security restrictions (X-Frame-Options) or an invalid URL.
+        </p>
+    </div>
+</body>
+</html>
