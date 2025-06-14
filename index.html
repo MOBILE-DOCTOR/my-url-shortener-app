@@ -3,8 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>URL Shortener & Preview (Admin)</title>
+    <title>Advanced URL Shortener & Admin (Special Features)</title>
+    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- QR Code Library CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode.js/1.0.0/qrcode.min.js"></script>
     <style>
         body {
             font-family: "Inter", sans-serif;
@@ -51,6 +54,9 @@
         }
         #messageBox.error {
             background-color: #f44336;
+        }
+        #messageBox.info {
+            background-color: #2196F3;
         }
         #messageBox.show {
             display: block;
@@ -102,19 +108,60 @@
             -ms-transform: translateX(16px);
             transform: translateX(16px);
         }
+
+        /* Password Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1001;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+        .modal-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+        .modal-content {
+            background-color: white;
+            padding: 2rem;
+            border-radius: 0.75rem;
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.2);
+            width: 90%;
+            max-width: 400px;
+            text-align: center;
+        }
+        .modal-close-button {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #4a5568;
+        }
     </style>
+    <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, Timestamp, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, Timestamp, getDocs, increment, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Firebase Configuration (from your input)
+        // Firebase Configuration
         const firebaseConfig = {
             apiKey: "AIzaSyAGnngrCaf5327zkOq1Eqhl8aIkIy4CFYc",
             authDomain: "my-url-shortener-app.firebaseapp.com",
             databaseURL: "https://my-url-shortener-app-default-rtdb.asia-southeast1.firebasedatabase.app",
             projectId: "my-url-shortener-app",
-            storageBucket: "my-url-shortener-app.firebasestorage.app",
+            storageBucket: "my-url-shortener-app.firebase-storage.app",
             messagingSenderId: "111222164281",
             appId: "1:111222164281:web:cb5c9c65a32133c69936e8"
         };
@@ -134,7 +181,7 @@
         window.showMessage = (message, type = 'success', duration = 3000) => {
             const messageBox = document.getElementById('messageBox');
             messageBox.textContent = message;
-            messageBox.classList.remove('success', 'error');
+            messageBox.classList.remove('success', 'error', 'info');
             messageBox.classList.add(type);
             messageBox.classList.add('show');
             setTimeout(() => {
@@ -224,33 +271,81 @@
         };
 
         /**
+         * Checks if a short code already exists in Firestore across all users.
+         * @param {string} shortCode - The short code to check.
+         * @returns {Promise<boolean>} True if the short code exists, false otherwise.
+         */
+        window.isShortCodeTaken = async (shortCode) => {
+            const usersCollection = collection(db, `artifacts/${APP_ID}/users`);
+            const usersSnapshot = await getDocs(usersCollection);
+            for (const userDoc of usersSnapshot.docs) {
+                const userId = userDoc.id;
+                const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
+                const docRef = doc(urlCollectionRef, shortCode);
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        /**
          * Generates a unique short code for the URL.
          * @returns {string} A unique short code.
          */
-        window.generateShortCode = () => {
+        window.generateRandomShortCode = () => {
             return Math.random().toString(36).substring(2, 10);
         };
 
         /**
          * Saves a new shortened URL to Firestore for the current user.
          * @param {string} longUrl - The original long URL.
+         * @param {string} customShortCode - Optional custom short code.
+         * @param {string} password - Optional password for the URL.
          * @returns {Promise<Object>} A promise that resolves with the saved URL data.
          */
-        window.saveShortenedUrl = async (longUrl) => {
+        window.saveShortenedUrl = async (longUrl, customShortCode, password) => {
             if (!currentUserId) {
                 throw new Error("User not authenticated.");
             }
-            const shortCode = window.generateShortCode();
+
+            let shortCodeToUse = customShortCode || window.generateRandomShortCode();
+
+            // Custom short code validation
+            if (customShortCode) {
+                // For demonstration, let's allow "mobiledoctor.store" but check if it's already used.
+                // In a real app, you might validate against reserved keywords or formats.
+                if (customShortCode.length < 3) {
+                     throw new Error("Custom short code must be at least 3 characters long.");
+                }
+                if (customShortCode.includes('/') || customShortCode.includes('.') && customShortCode !== "mobiledoctor.store") {
+                    throw new Error("Custom short code cannot contain '/' or '.' unless it is 'mobiledoctor.store'.");
+                }
+                const isTaken = await window.isShortCodeTaken(customShortCode);
+                if (isTaken) {
+                    throw new Error(`Custom short code '${customShortCode}' is already taken.`);
+                }
+            } else {
+                // Ensure random code is also unique (unlikely for random but good practice)
+                while (await window.isShortCodeTaken(shortCodeToUse)) {
+                    shortCodeToUse = window.generateRandomShortCode();
+                }
+            }
+
+
             const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${currentUserId}/shortenedUrls`);
-            const docRef = doc(urlCollectionRef, shortCode);
+            const docRef = doc(urlCollectionRef, shortCodeToUse); // Use the chosen short code as document ID
             const urlData = {
                 longUrl: longUrl,
-                shortCode: shortCode,
+                shortCode: shortCodeToUse, // Store the final short code
                 isActive: true,
                 expiresAt: null,
                 createdAt: serverTimestamp(),
                 createdBy: currentUserId,
-                createdByEmail: currentUserEmail
+                createdByEmail: currentUserEmail,
+                clickCount: 0, // Initialize click count
+                password: password || null // Store password (plaintext, see disclaimer)
             };
             await setDoc(docRef, urlData);
             return urlData;
@@ -267,7 +362,6 @@
                 window.showMessage("Not authenticated.", "error");
                 return;
             }
-            // In a real app, admin would need security rules to access other users' data
             const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
             const docRef = doc(urlCollectionRef, shortCode);
             await setDoc(docRef, { isActive: isActive }, { merge: true });
@@ -292,91 +386,256 @@
         };
 
         /**
+         * Increments the click count for a given URL in Firestore.
+         * @param {string} userId - The ID of the user who owns the URL.
+         * @param {string} shortCode - The short code of the URL.
+         */
+        window.incrementClickCount = async (userId, shortCode) => {
+             if (!currentUserId) { // Only track clicks if someone is logged in
+                return;
+            }
+            const urlCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
+            const docRef = doc(urlCollectionRef, shortCode);
+            await setDoc(docRef, { clickCount: increment(1) }, { merge: true });
+            console.log(`Click count incremented for ${shortCode}`);
+        };
+
+
+        /**
+         * Copies the given text to the clipboard.
+         * @param {string} text - The text to copy.
+         * @returns {boolean} True if copied successfully, false otherwise.
+         */
+        function copyTextToClipboard(text) {
+            try {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                return true;
+            } catch (err) {
+                console.error('Failed to copy text:', err);
+                return false;
+            }
+        }
+
+        /**
+         * Displays the URL in the preview iframe.
+         * @param {string} url - The URL to preview.
+         * @param {string} ownerId - The ID of the user who owns the URL (for click tracking).
+         * @param {string} shortCode - The short code of the URL (for click tracking).
+         */
+        function showPreview(url, ownerId, shortCode) {
+            const previewContainer = document.getElementById('previewContainer');
+            const previewSpinner = document.getElementById('previewSpinner');
+            const previewLoadingText = document.getElementById('previewLoadingText');
+            const previewFrame = document.getElementById('previewFrame');
+            const previewError = document.getElementById('previewError');
+
+            previewError.classList.add('hidden');
+            previewContainer.classList.remove('hidden');
+            previewSpinner.classList.remove('hidden');
+            previewLoadingText.classList.remove('hidden');
+            previewContainer.scrollIntoView({ behavior: 'smooth' });
+            previewFrame.src = url;
+
+            // Add event listener to increment click count on successful iframe load
+            const handleLoad = () => {
+                window.incrementClickCount(ownerId, shortCode);
+                previewFrame.removeEventListener('load', handleLoad); // Remove to prevent multiple increments
+            };
+            previewFrame.addEventListener('load', handleLoad);
+        }
+
+        /**
+         * Handles the password protection modal.
+         * @param {Object} urlData - The URL object with password and other details.
+         */
+        window.handlePasswordProtectedPreview = (urlData) => {
+            const passwordModal = document.getElementById('passwordModal');
+            const passwordInput = document.getElementById('passwordModalInput');
+            const passwordMessage = document.getElementById('passwordModalMessage');
+            const passwordSubmitButton = document.getElementById('passwordModalSubmit');
+
+            passwordInput.value = ''; // Clear previous input
+            passwordMessage.textContent = ''; // Clear previous messages
+            passwordModal.classList.add('show');
+
+            const handleSubmit = () => {
+                if (passwordInput.value === urlData.password) {
+                    passwordModal.classList.remove('show');
+                    window.showMessage('Password correct! Loading preview.', 'success');
+                    showPreview(urlData.longUrl, urlData.createdBy, urlData.shortCode);
+                } else {
+                    passwordMessage.textContent = 'Incorrect password.';
+                    passwordMessage.classList.add('text-red-500');
+                }
+            };
+
+            const handleClose = () => {
+                passwordModal.classList.remove('show');
+                passwordInput.removeEventListener('keydown', handleKeydown);
+                passwordSubmitButton.removeEventListener('click', handleSubmit);
+            };
+
+            const handleKeydown = (event) => {
+                if (event.key === 'Enter') {
+                    handleSubmit();
+                }
+            };
+
+            passwordSubmitButton.addEventListener('click', handleSubmit);
+            document.getElementById('passwordModalClose').addEventListener('click', handleClose);
+            passwordInput.addEventListener('keydown', handleKeydown);
+        };
+
+
+        /**
+         * Generates and displays a QR code for a given URL.
+         * @param {string} shortUrl - The shortened URL to encode in the QR code.
+         * @param {HTMLElement} element - The DOM element where the QR code canvas should be appended.
+         */
+        function generateAndDisplayQrCode(shortUrl, element) {
+            element.innerHTML = ''; // Clear previous QR code if any
+            if (!shortUrl || !element) return;
+
+            // QRCode.js creates a canvas or img tag.
+            // Using a new QRCode instance for each QR code.
+            new QRCode(element, {
+                text: shortUrl,
+                width: 64,  // Smaller size for list view
+                height: 64,
+                colorDark : "#000000",
+                colorLight : "#ffffff",
+                correctLevel : QRCode.CorrectLevel.H
+            });
+        }
+
+
+        /**
+         * Renders a single URL item for both user and admin panels.
+         * @param {Object} url - The URL object from Firestore.
+         * @param {boolean} isAdminView - True if rendering for admin panel.
+         * @returns {HTMLElement} The created div element for the URL item.
+         */
+        const renderUrlItem = (url, isAdminView = false) => {
+            const isExpired = url.expiresAt && url.expiresAt.toDate() < new Date();
+            const statusText = isExpired ? 'Expired' : (url.isActive ? 'Active' : 'Inactive');
+            let statusColor = 'text-green-600';
+            if (!url.isActive) statusColor = 'text-red-600';
+            if (isExpired) statusColor = 'text-yellow-600';
+
+            const urlItem = document.createElement('div');
+            urlItem.className = `bg-gray-50 p-4 rounded-lg shadow-sm border border-gray-200 ${!url.isActive || isExpired ? 'opacity-70' : ''} mb-4`;
+            if (isAdminView) {
+                 urlItem.classList.add('bg-white', 'border-blue-100', 'p-3'); // Lighter for nested admin view
+            }
+
+            const shortDisplayUrl = `https://app.com/s/${url.shortCode}`;
+
+            urlItem.innerHTML = `
+                <div class="flex flex-col md:flex-row md:items-center justify-between mb-2">
+                    <div class="mb-2 md:mb-0 flex-grow">
+                        ${isAdminView ? `<p class="text-xs text-gray-500">Owner: ${url.createdByEmail || 'N/A'}</p>` : ''}
+                        <p class="text-sm font-semibold text-blue-700 break-words">Short: <span class="font-normal text-blue-500">${shortDisplayUrl}</span></p>
+                        <p class="text-sm text-gray-700 break-words">Original: <a href="${url.longUrl}" target="_blank" class="text-blue-500 hover:underline">${url.longUrl}</a></p>
+                        <p class="text-xs text-gray-600 mt-1">Clicks: <span class="font-semibold">${url.clickCount || 0}</span> | Pass: ${url.password ? '<span class="text-orange-500">Protected</span>' : 'None'}</p>
+                    </div>
+                    <div class="flex items-center space-x-4 flex-shrink-0 mt-2 md:mt-0">
+                        <div id="qrcode-${url.shortCode}${isAdminView ? '-admin-' + url.createdBy : ''}" class="p-1 border border-gray-200 rounded"></div>
+                        <span class="font-bold ${statusColor}">${statusText}</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" data-short-code="${url.shortCode}" data-user-id="${url.createdBy}" ${url.isActive ? 'checked' : ''} ${isExpired ? 'disabled' : ''}>
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+                </div>
+                <div class="flex flex-col sm:flex-row items-start sm:items-center gap-2 mt-3 pt-3 border-t border-gray-200">
+                    <label for="expiry-${url.shortCode}${isAdminView ? '-admin-' + url.createdBy : ''}" class="text-sm text-gray-600 mr-2 flex-shrink-0">Expire On:</label>
+                    <input type="datetime-local" id="expiry-${url.shortCode}${isAdminView ? '-admin-' + url.createdBy : ''}" value="${url.expiresAt ? new Date(url.expiresAt.toDate().getTime() - (url.expiresAt.toDate().getTimezoneOffset() * 60000)).toISOString().slice(0, 16) : ''}"
+                        class="w-full sm:w-auto px-2 py-1 border border-gray-300 rounded-md text-sm text-gray-900 focus:ring-blue-500 focus:border-blue-500" ${isExpired ? 'disabled' : ''}>
+                    <button data-short-code="${url.shortCode}" data-action="set-expiry" data-user-id="${url.createdBy}"
+                        class="w-full sm:w-auto bg-gray-200 text-gray-700 text-sm py-1 px-3 rounded-md hover:bg-gray-300 transition duration-200 ease-in-out flex-shrink-0" ${isExpired ? 'disabled' : ''}>
+                        Set Expiry
+                    </button>
+                    <button data-short-code="${url.shortCode}" data-action="preview" data-user-id="${url.createdBy}"
+                        class="w-full sm:w-auto bg-blue-500 text-white text-sm py-1 px-3 rounded-md hover:bg-blue-600 transition duration-200 ease-in-out flex-shrink-0">
+                        View Preview
+                    </button>
+                </div>
+            `;
+
+            // Append to DOM first, then generate QR code as it needs to attach to an element
+            setTimeout(() => { // Small delay to ensure element is in DOM
+                const qrcodeElementId = `qrcode-${url.shortCode}${isAdminView ? '-admin-' + url.createdBy : ''}`;
+                const qrcodeElement = urlItem.querySelector(`#${qrcodeElementId}`);
+                if (qrcodeElement) {
+                    generateAndDisplayQrCode(shortDisplayUrl, qrcodeElement);
+                }
+            }, 0);
+
+
+            // Add event listeners
+            const toggleInput = urlItem.querySelector(`input[type="checkbox"]`);
+            if (toggleInput) {
+                toggleInput.addEventListener('change', async (event) => {
+                    const code = event.target.dataset.shortCode;
+                    const userId = event.target.dataset.userId;
+                    await window.updateUrlActiveStatus(userId, code, event.target.checked);
+                });
+            }
+
+            const setExpiryButton = urlItem.querySelector(`button[data-action="set-expiry"]`);
+            if (setExpiryButton) {
+                setExpiryButton.addEventListener('click', async (event) => {
+                    const code = event.target.dataset.shortCode;
+                    const userId = event.target.dataset.userId;
+                    const expiryInput = urlItem.querySelector(`#expiry-${code}${isAdminView ? '-admin-' + userId : ''}`);
+                    const expiryValue = expiryInput.value;
+                    let expiryDate = null;
+                    if (expiryValue) {
+                        expiryDate = new Date(expiryValue);
+                        if (isNaN(expiryDate.getTime())) {
+                            window.showMessage("Invalid date/time for expiration.", "error");
+                            return;
+                        }
+                    }
+                    await window.updateUrlExpiration(userId, code, expiryDate);
+                });
+            }
+
+            const viewPreviewButton = urlItem.querySelector(`button[data-action="preview"]`);
+            if (viewPreviewButton) {
+                viewPreviewButton.addEventListener('click', () => {
+                    if (url.password) {
+                        window.handlePasswordProtectedPreview(url);
+                    } else {
+                        showPreview(url.longUrl, url.createdBy, url.shortCode);
+                    }
+                });
+            }
+            return urlItem;
+        };
+
+
+        /**
          * Renders the list of shortened URLs for a regular user.
          * @param {Array<Object>} urls - An array of URL objects from Firestore.
          */
         window.renderUserShortenedUrls = (urls) => {
             const userUrlsList = document.getElementById('userShortenedUrlsList');
             const noUserUrlsMessage = document.getElementById('noUserUrlsMessage');
-            userUrlsList.innerHTML = '';
+            userUrlsList.innerHTML = ''; // Clear previous list
             if (urls.length === 0) {
                 noUserUrlsMessage.classList.remove('hidden');
             } else {
                 noUserUrlsMessage.classList.add('hidden');
                 urls.forEach(url => {
-                    const isExpired = url.expiresAt && url.expiresAt.toDate() < new Date();
-                    const statusText = isExpired ? 'Expired' : (url.isActive ? 'Active' : 'Inactive');
-                    let statusColor = 'text-green-600';
-                    if (!url.isActive) statusColor = 'text-red-600';
-                    if (isExpired) statusColor = 'text-yellow-600';
-
-                    const urlItem = document.createElement('div');
-                    urlItem.className = `bg-gray-50 p-4 rounded-lg shadow-sm border border-gray-200 ${!url.isActive || isExpired ? 'opacity-70' : ''}`;
-                    urlItem.innerHTML = `
-                        <div class="flex flex-col md:flex-row md:items-center justify-between mb-2">
-                            <div class="mb-2 md:mb-0">
-                                <p class="text-sm font-semibold text-blue-700 break-words">Short: <span class="font-normal text-blue-500">https://app.com/s/${url.shortCode}</span></p>
-                                <p class="text-sm text-gray-700 break-words">Original: <a href="${url.longUrl}" target="_blank" class="text-blue-500 hover:underline">${url.longUrl}</a></p>
-                            </div>
-                            <div class="flex items-center space-x-4">
-                                <span class="font-bold ${statusColor}">${statusText}</span>
-                                <label class="toggle-switch">
-                                    <input type="checkbox" data-short-code="${url.shortCode}" ${url.isActive ? 'checked' : ''} ${isExpired ? 'disabled' : ''}>
-                                    <span class="slider round"></span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="flex flex-col sm:flex-row items-start sm:items-center gap-2 mt-3 pt-3 border-t border-gray-200">
-                            <label for="expiry-${url.shortCode}" class="text-sm text-gray-600 mr-2 flex-shrink-0">Expire On:</label>
-                            <input type="datetime-local" id="expiry-${url.shortCode}" value="${url.expiresAt ? new Date(url.expiresAt.toDate().getTime() - (url.expiresAt.toDate().getTimezoneOffset() * 60000)).toISOString().slice(0, 16) : ''}"
-                                class="w-full sm:w-auto px-2 py-1 border border-gray-300 rounded-md text-sm text-gray-900 focus:ring-blue-500 focus:border-blue-500" ${isExpired ? 'disabled' : ''}>
-                            <button data-short-code="${url.shortCode}" data-action="set-expiry" data-user-id="${currentUserId}"
-                                class="w-full sm:w-auto bg-gray-200 text-gray-700 text-sm py-1 px-3 rounded-md hover:bg-gray-300 transition duration-200 ease-in-out flex-shrink-0" ${isExpired ? 'disabled' : ''}>
-                                Set Expiry
-                            </button>
-                            <button data-short-code="${url.shortCode}" data-action="preview" data-long-url="${url.longUrl}"
-                                class="w-full sm:w-auto bg-blue-500 text-white text-sm py-1 px-3 rounded-md hover:bg-blue-600 transition duration-200 ease-in-out flex-shrink-0">
-                                View Preview
-                            </button>
-                        </div>
-                    `;
-                    userUrlsList.appendChild(urlItem);
-
-                    // Add event listeners for the new elements
-                    const toggleInput = urlItem.querySelector(`input[type="checkbox"]`);
-                    if (toggleInput) {
-                        toggleInput.addEventListener('change', async (event) => {
-                            const code = event.target.dataset.shortCode;
-                            await window.updateUrlActiveStatus(currentUserId, code, event.target.checked);
-                        });
-                    }
-
-                    const setExpiryButton = urlItem.querySelector(`button[data-action="set-expiry"]`);
-                    if (setExpiryButton) {
-                        setExpiryButton.addEventListener('click', async (event) => {
-                            const code = event.target.dataset.shortCode;
-                            const userId = event.target.dataset.userId;
-                            const expiryInput = urlItem.querySelector(`#expiry-${code}`);
-                            const expiryValue = expiryInput.value;
-                            let expiryDate = null;
-                            if (expiryValue) {
-                                expiryDate = new Date(expiryValue);
-                                if (isNaN(expiryDate.getTime())) {
-                                    window.showMessage("Invalid date/time for expiration.", "error");
-                                    return;
-                                }
-                            }
-                            await window.updateUrlExpiration(userId, code, expiryDate);
-                        });
-                    }
-
-                    const viewPreviewButton = urlItem.querySelector(`button[data-action="preview"]`);
-                    if (viewPreviewButton) {
-                        viewPreviewButton.addEventListener('click', (event) => {
-                            const longUrl = event.target.dataset.longUrl;
-                            showPreview(longUrl);
-                        });
-                    }
+                    userUrlsList.appendChild(renderUrlItem(url, false));
                 });
             }
         };
@@ -396,6 +655,8 @@
                     const data = doc.data();
                     urls.push({ id: doc.id, ...data });
                 });
+                // Sort by createdAt descending
+                urls.sort((a, b) => (b.createdAt?.toDate() || 0) - (a.createdAt?.toDate() || 0));
                 window.renderUserShortenedUrls(urls);
             }, (error) => {
                 console.error("Error fetching user shortened URLs:", error);
@@ -436,88 +697,18 @@
                 adminUsersList.appendChild(userDiv);
 
                 const userUrlsContainer = userDiv.querySelector(`#urls-for-user-${user.id}`);
+                // Sort URLs by createdAt descending for admin view too
+                user.urls.sort((a, b) => (b.createdAt?.toDate() || 0) - (a.createdAt?.toDate() || 0));
+
                 user.urls.forEach(url => {
-                    const isExpired = url.expiresAt && url.expiresAt.toDate() < new Date();
-                    const statusText = isExpired ? 'Expired' : (url.isActive ? 'Active' : 'Inactive');
-                    let statusColor = 'text-green-600';
-                    if (!url.isActive) statusColor = 'text-red-600';
-                    if (isExpired) statusColor = 'text-yellow-600';
-
-                    const urlItem = document.createElement('div');
-                    urlItem.className = `bg-white p-3 rounded-md border border-gray-100 ${!url.isActive || isExpired ? 'opacity-70' : ''}`;
-                    urlItem.innerHTML = `
-                        <p class="text-xs font-semibold text-gray-700 break-words">Short: <span class="font-normal text-blue-500">https://app.com/s/${url.shortCode}</span></p>
-                        <p class="text-xs text-gray-600 break-words">Original: <a href="${url.longUrl}" target="_blank" class="text-blue-500 hover:underline">${url.longUrl}</a></p>
-                        <div class="flex items-center justify-between mt-2">
-                            <div class="flex items-center space-x-2">
-                                <span class="font-bold text-xs ${statusColor}">${statusText}</span>
-                                <label class="toggle-switch transform scale-75">
-                                    <input type="checkbox" data-short-code="${url.shortCode}" data-user-id="${user.id}" ${url.isActive ? 'checked' : ''} ${isExpired ? 'disabled' : ''}>
-                                    <span class="slider round"></span>
-                                </label>
-                            </div>
-                            <div class="flex space-x-2 items-center">
-                                <label for="admin-expiry-${user.id}-${url.shortCode}" class="text-xs text-gray-600 flex-shrink-0">Expire:</label>
-                                <input type="datetime-local" id="admin-expiry-${user.id}-${url.shortCode}" value="${url.expiresAt ? new Date(url.expiresAt.toDate().getTime() - (url.expiresAt.toDate().getTimezoneOffset() * 60000)).toISOString().slice(0, 16) : ''}"
-                                    class="w-32 px-1 py-0.5 border border-gray-300 rounded-md text-xs text-gray-900 focus:ring-blue-500 focus:border-blue-500" ${isExpired ? 'disabled' : ''}>
-                                <button data-short-code="${url.shortCode}" data-user-id="${user.id}" data-action="admin-set-expiry"
-                                    class="bg-gray-200 text-gray-700 text-xs py-1 px-2 rounded-md hover:bg-gray-300 transition duration-200 ease-in-out flex-shrink-0" ${isExpired ? 'disabled' : ''}>
-                                    Set
-                                </button>
-                                <button data-short-code="${url.shortCode}" data-long-url="${url.longUrl}" data-action="preview"
-                                    class="bg-blue-500 text-white text-xs py-1 px-2 rounded-md hover:bg-blue-600 transition duration-200 ease-in-out flex-shrink-0">
-                                    Preview
-                                </button>
-                            </div>
-                        </div>
-                    `;
-                    userUrlsContainer.appendChild(urlItem);
-
-                    // Add event listeners for admin controls
-                    const toggleInput = urlItem.querySelector(`input[type="checkbox"]`);
-                    if (toggleInput) {
-                        toggleInput.addEventListener('change', async (event) => {
-                            const code = event.target.dataset.shortCode;
-                            const ownerId = event.target.dataset.userId;
-                            await window.updateUrlActiveStatus(ownerId, code, event.target.checked);
-                        });
-                    }
-
-                    const setExpiryButton = urlItem.querySelector(`button[data-action="admin-set-expiry"]`);
-                    if (setExpiryButton) {
-                        setExpiryButton.addEventListener('click', async (event) => {
-                            const code = event.target.dataset.shortCode;
-                            const ownerId = event.target.dataset.userId;
-                            const expiryInput = urlItem.querySelector(`#admin-expiry-${ownerId}-${code}`);
-                            const expiryValue = expiryInput.value;
-                            let expiryDate = null;
-                            if (expiryValue) {
-                                expiryDate = new Date(expiryValue);
-                                if (isNaN(expiryDate.getTime())) {
-                                    window.showMessage("Invalid date/time for expiration.", "error");
-                                    return;
-                                }
-                            }
-                            await window.updateUrlExpiration(ownerId, code, expiryDate);
-                        });
-                    }
-
-                    const viewPreviewButton = urlItem.querySelector(`button[data-action="preview"]`);
-                    if (viewPreviewButton) {
-                        viewPreviewButton.addEventListener('click', (event) => {
-                            const longUrl = event.target.dataset.long-url;
-                            showPreview(longUrl);
-                        });
-                    }
+                    userUrlsContainer.appendChild(renderUrlItem(url, true)); // Pass true for admin view
                 });
 
-                // Add event listener for remove user button
                 const removeUserButton = userDiv.querySelector('button[data-action="remove-user"]');
                 if (removeUserButton) {
                     removeUserButton.addEventListener('click', () => {
                         window.showMessage(`User removal for ${user.email || user.id} is simulated. In a real app, this would delete their auth and data.`, 'info', 5000);
                         console.log(`Simulating remove user: ${user.id}`);
-                        // In a real app, you'd call a Cloud Function or Admin SDK here
                     });
                 }
             });
@@ -533,29 +724,26 @@
                 return;
             }
 
-            // Get all user document IDs from the 'users' collection (assuming you have one, or infer from 'shortenedUrls' paths)
-            // Note: Firestore doesn't provide a direct way to list all subcollections.
-            // We'll iterate through all possible user IDs by first getting users who have created URLs
-            // This is a simplified approach. In a real app, you'd likely have a 'users' collection
-            // to list all user UIDs and loop through those.
+            const rootUsersCollection = collection(db, `artifacts/${APP_ID}/users`);
 
-            const rootArtifactsCollection = collection(db, `artifacts/${APP_ID}/users`);
-
-            // This will listen for any change within any user's shortenedUrls subcollection
-            onSnapshot(rootArtifactsCollection, async (usersSnapshot) => {
-                const usersData = [];
-                for (const userDoc of usersSnapshot.docs) {
+            // This is a simplified approach. In a real app, you'd have a
+            // 'users' collection to list all user UIDs and loop through those,
+            // or use Firebase Functions to aggregate data securely.
+            // This setup relies on getting user docs from the path where they create URLs.
+            onSnapshot(rootUsersCollection, async (usersSnapshot) => {
+                const usersDataPromises = usersSnapshot.docs.map(async (userDoc) => {
                     const userId = userDoc.id;
                     const userUrlsCollectionRef = collection(db, `artifacts/${APP_ID}/users/${userId}/shortenedUrls`);
-                    const userUrlsSnapshot = await getDocs(userUrlsCollectionRef); // Fetch all URLs for this user
+                    const userUrlsSnapshot = await getDocs(userUrlsCollectionRef);
                     const urls = [];
                     userUrlsSnapshot.forEach(urlDoc => {
                         urls.push({ id: urlDoc.id, ...urlDoc.data() });
                     });
-                    // Assuming userDoc.data() might contain user info, but often 'users' collection stores it.
-                    // For this demo, we can just use userId and maybe an inferred email.
-                    usersData.push({ id: userId, email: urls[0]?.createdByEmail || 'N/A', urls: urls }); // Use createdByEmail from first URL if available
-                }
+                    // Try to get user email from one of their URLs, or just use userId
+                    const userEmail = urls.length > 0 ? urls[0].createdByEmail : 'Anonymous User';
+                    return { id: userId, email: userEmail, urls: urls };
+                });
+                const usersData = await Promise.all(usersDataPromises);
                 window.renderAdminUsersAndUrls(usersData);
             }, (error) => {
                 console.error("Error fetching all users' URLs for admin:", error);
@@ -566,30 +754,34 @@
             document.getElementById('addDummyUserButton').addEventListener('click', () => {
                 window.showMessage('Adding a new user is simulated. In a real app, this would use Firebase Admin SDK.', 'info', 5000);
                 console.log('Simulating add new user.');
-                // In a real app, you'd call a Cloud Function or Admin SDK here
             });
         };
 
-        /**
-         * Displays the URL in the preview iframe.
-         * @param {string} url - The URL to preview.
-         */
-        function showPreview(url) {
-            previewError.classList.add('hidden');
-            previewContainer.classList.remove('hidden');
-            previewSpinner.classList.remove('hidden');
-            previewLoadingText.classList.remove('hidden');
-            previewContainer.scrollIntoView({ behavior: 'smooth' });
-            previewFrame.src = url;
-        }
-
         // Event listener for main shorten button
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('shortenButton').addEventListener('click', async () => {
-                const longUrl = document.getElementById('longUrl').value.trim();
+            const shortenButton = document.getElementById('shortenButton');
+            const longUrlInput = document.getElementById('longUrl');
+            const customShortCodeInput = document.getElementById('customShortCode');
+            const passwordInput = document.getElementById('passwordInput');
+            const shortenText = document.getElementById('shortenText');
+            const shortenSpinner = document.getElementById('shortenSpinner');
+            const latestResultContainer = document.getElementById('latestResultContainer');
+            const shortUrlDisplay = document.getElementById('shortUrlDisplay');
+            const copyButton = document.getElementById('copyButton');
+            const copyMessage = document.getElementById('copyMessage');
+            const previewFrame = document.getElementById('previewFrame');
+            const previewError = document.getElementById('previewError');
+
+            // Initialize preview frame to a blank page to avoid initial errors
+            previewFrame.src = 'about:blank';
+
+            shortenButton.addEventListener('click', async () => {
+                const longUrl = longUrlInput.value.trim();
+                const customShortCode = customShortCodeInput.value.trim();
+                const password = passwordInput.value.trim();
 
                 latestResultContainer.classList.add('hidden');
-                previewContainer.classList.add('hidden');
+                document.getElementById('previewContainer').classList.add('hidden');
                 previewError.classList.add('hidden');
                 copyMessage.classList.add('hidden');
                 previewFrame.src = 'about:blank';
@@ -612,11 +804,12 @@
                 shortenButton.disabled = true;
 
                 try {
-                    const savedUrlData = await window.saveShortenedUrl(longUrl);
-                    document.getElementById('shortUrlDisplay').value = `https://app.com/s/${savedUrlData.shortCode}`;
+                    const savedUrlData = await window.saveShortenedUrl(longUrl, customShortCode, password);
+                    const displayShortUrl = `https://app.com/s/${savedUrlData.shortCode}`;
+                    shortUrlDisplay.value = displayShortUrl;
                     latestResultContainer.classList.remove('hidden');
                     window.showMessage('URL shortened successfully!', 'success');
-                    showPreview(longUrl); // Show preview of the original URL
+                    // No automatic preview after shortening, user clicks "View Preview" in list
                 } catch (error) {
                     window.showMessage(`Error shortening URL: ${error.message}`, 'error');
                     console.error('Shortening error:', error);
@@ -624,21 +817,56 @@
                     shortenText.classList.remove('hidden');
                     shortenSpinner.classList.add('hidden');
                     shortenButton.disabled = false;
+                    longUrlInput.value = ''; // Clear inputs after shortening
+                    customShortCodeInput.value = '';
+                    passwordInput.value = '';
                 }
             });
 
             // Event listener for copy button
-            document.getElementById('copyButton').addEventListener('click', () => {
-                const shortUrl = document.getElementById('shortUrlDisplay').value;
+            copyButton.addEventListener('click', () => {
+                const shortUrl = shortUrlDisplay.value;
                 if (shortUrl) {
                     if (copyTextToClipboard(shortUrl)) {
-                        document.getElementById('copyMessage').classList.remove('hidden');
-                        setTimeout(() => document.getElementById('copyMessage').classList.add('hidden'), 2000);
+                        copyMessage.classList.remove('hidden');
+                        setTimeout(() => copyMessage.classList.add('hidden'), 2000);
                     } else {
                         window.showMessage('Failed to copy. Please try manually.', 'error');
                     }
                 }
             });
+
+            // Password modal event listeners
+            document.getElementById('passwordModalClose').addEventListener('click', () => {
+                document.getElementById('passwordModal').classList.remove('show');
+            });
+
+
+            // Handle iframe errors
+            previewFrame.addEventListener('error', () => {
+                document.getElementById('previewSpinner').classList.add('hidden');
+                document.getElementById('previewLoadingText').classList.add('hidden');
+                previewError.classList.remove('hidden');
+                console.error("Error loading iframe content.");
+            });
+
+            // Handle iframe load (for initial load and subsequent previews)
+            previewFrame.addEventListener('load', () => {
+                document.getElementById('previewSpinner').classList.add('hidden');
+                document.getElementById('previewLoadingText').classList.add('hidden');
+                try {
+                    // This check is a heuristic; cross-origin errors prevent direct contentDocument access.
+                    if (previewFrame.contentDocument && previewFrame.contentDocument.body && previewFrame.contentDocument.body.children.length === 0 && previewFrame.src !== 'about:blank') {
+                        previewError.classList.remove('hidden');
+                    } else {
+                        previewError.classList.add('hidden');
+                    }
+                } catch (e) {
+                    console.warn("Preview load error (likely X-Frame-Options or cross-origin issue):", e);
+                    previewError.classList.remove('hidden');
+                }
+            });
+
 
             // Initialize Firebase on DOM content loaded
             window.initFirebase();
@@ -647,8 +875,29 @@
 </head>
 <body class="flex flex-col items-center min-h-screen p-4 bg-gray-100 text-gray-800">
 
+    <!-- Message Box -->
     <div id="messageBox" class="rounded-lg"></div>
 
+    <!-- Password Modal -->
+    <div id="passwordModal" class="modal-overlay">
+        <div class="modal-content relative">
+            <button id="passwordModalClose" class="modal-close-button">&times;</button>
+            <h3 class="text-xl font-bold text-blue-700 mb-4">Enter Password to View Preview</h3>
+            <p class="text-sm text-red-500 mb-4">
+                <strong>WARNING:</strong> This is a client-side demo. Passwords are stored in plaintext in Firestore, which is **HIGHLY INSECURE** for real applications.
+            </p>
+            <input type="password" id="passwordModalInput" placeholder="Enter password"
+                   class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900 mb-3">
+            <p id="passwordModalMessage" class="text-sm mb-4"></p>
+            <button id="passwordModalSubmit"
+                    class="bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                Submit
+            </button>
+        </div>
+    </div>
+
+
+    <!-- Authentication Section -->
     <div class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-lg mb-8 text-center">
         <h1 class="text-3xl font-bold text-blue-700 mb-4">🔗 URL Shortener & Admin</h1>
         <p id="authStatus" class="text-gray-700 mb-4">Loading authentication status...</p>
@@ -662,6 +911,7 @@
         </button>
     </div>
 
+    <!-- URL Shortener Section (Visible to all logged-in users) -->
     <div id="urlShortenerSection" class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-lg mb-8 hidden">
         <h2 class="text-2xl font-bold text-center text-blue-700 mb-6">Shorten Your URLs</h2>
         <div class="mb-5">
@@ -671,6 +921,21 @@
                    value="https://www.google.com">
             <p class="text-xs text-gray-500 mt-1">Make sure to include 'http://' or 'https://'</p>
         </div>
+
+        <div class="mb-5">
+            <label for="customShortCode" class="block text-gray-700 text-sm font-semibold mb-2">Custom Short Code (Optional):</label>
+            <input type="text" id="customShortCode" placeholder="e.g., my-special-link or mobiledoctor.store"
+                   class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900">
+            <p class="text-xs text-gray-500 mt-1">If left blank, a random code will be generated. Avoid special characters.</p>
+        </div>
+
+        <div class="mb-5">
+            <label for="passwordInput" class="block text-gray-700 text-sm font-semibold mb-2">Password (Optional):</label>
+            <input type="password" id="passwordInput" placeholder="Password for preview access (e.g., secret123)"
+                   class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900">
+            <p class="text-xs text-red-500 mt-1"><strong>WARNING:</strong> For demo only. Passwords stored in plaintext!</p>
+        </div>
+
         <div class="flex flex-col sm:flex-row gap-4 mb-6">
             <button id="shortenButton"
                     class="flex items-center justify-center flex-grow bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
@@ -695,6 +960,7 @@
         </div>
     </div>
 
+    <!-- User Panel (Visible to non-admin users) -->
     <div id="userPanel" class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-5xl mb-8 hidden">
         <h2 class="text-2xl font-bold text-center text-blue-700 mb-4">Your Shortened URLs</h2>
         <div id="userShortenedUrlsList" class="space-y-4">
@@ -702,6 +968,7 @@
         </div>
     </div>
 
+    <!-- Admin Panel (Visible only to ADMIN_EMAIL) -->
     <div id="adminPanel" class="bg-white p-6 md:p-8 rounded-xl shadow-lg w-full max-w-5xl mb-8 hidden">
         <h2 class="text-2xl font-bold text-center text-red-700 mb-4">👑 Admin Panel</h2>
         <div class="mb-6 border-b pb-4 border-red-200">
@@ -718,6 +985,7 @@
         </div>
     </div>
 
+    <!-- Preview Section -->
     <div id="previewContainer" class="hidden w-full max-w-5xl bg-white p-6 md:p-8 rounded-xl shadow-lg">
         <h2 class="text-2xl font-bold text-center text-blue-700 mb-4">Live Preview of Original URL</h2>
         <div class="flex items-center justify-center mb-4">
